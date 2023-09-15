@@ -11,10 +11,6 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
-}
-
 data "aws_directory_service_directory" "ad" {
   directory_id = var.ad_id
 }
@@ -131,7 +127,7 @@ resource "aws_ssm_document" "initialize_ca" {
           name   = "connectHSM",
           inputs = {
             runCommand = [
-              "${local.ca_initializer}",
+              "${local.hsm_initializer}",
             ]
           }
         },

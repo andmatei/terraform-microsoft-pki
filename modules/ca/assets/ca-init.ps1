@@ -16,20 +16,9 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.We
 # Install OpenSSL
 choco install openssl.light -y
 
-# Add OpenSSL to the system's PATH
-$opensslPath = "C:\Program Files\OpenSSL\bin"
-[Environment]::SetEnvironmentVariable("Path", "$opensslPath", [System.EnvironmentVariableTarget]::Machine)
-
-# Refresh PATH
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-
-# Create a new directory
-New-Item -Path "C:\Test" -ItemType Directory -Force
-
-# Change to the new directory
-Set-Location -Path "C:\Test"
-
-openssl genrsa  -out customerCA.key 2048
+# Refresh environment
+Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
+refreshenv
 
 # Create a new directory
 New-Item -Path "C:\HSM" -ItemType Directory -Force
@@ -39,43 +28,62 @@ Set-Location -Path "C:\HSM"
 
 # Get cluster CSR
 # aws cloudhsmv2 describe-clusters --filters clusterIds="${cluster_id}" --output text --query "Clusters[].Certificates.ClusterCsr" | Out-File -FilePath ".\clusterCSR.csr" -Encoding utf8
-# Define the name of the AWS Tools for PowerShell module
-$moduleName = 'AWSPowerShell'
+$cluster = Get-HSM2Cluster -Filter @{clusterIds = "${cluster_id}"} 
 
-# Check if the module is installed
-$installedModules = Get-Module -ListAvailable | Where-Object { $_.Name -eq $moduleName }
+if ($cluster.State -eq "UNINITIALIZED") {
+    $csr = $cluster.Certificates.ClusterCsr
+    $csr | Out-File -FilePath ".\clusterCSR.csr" -Encoding utf8
 
-if ($installedModules) {
-    Write-Host "AWS Tools for PowerShell module ('$moduleName') is installed."
+    # Create private key
+    openssl genrsa -out customerCA.key 2048
 
-    $importedModules = Get-Module -Name $moduleName -List
+    # Create self-signed certificate
+    openssl req -new -x509 -days 3652 -key customerCA.key -out customerCA.crt -subj "/C=US/ST=State/L=City/O=Organization/OU=Organizational Unit/CN=Common Name"
 
-    if ($importedModules) {
-        Write-Host "Module '$moduleName' is imported in the current session."
-
-        $cluster = Get-HSM2Cluster -Filter @{clusterIds = "${cluster_id}"}
-        $cluster.ClusterId | Out-File -FilePath ".\test.txt"
-    } else {
-        Write-Host "Module '$moduleName' is not imported in the current session."
-    }
-} else {
-    Write-Host "AWS Tools for PowerShell module ('$moduleName') is not installed."
-}
-
-# if ($cluster.State -eq "UNINITIALIZED") {
-    # $csr = $cluster.Certificates.ClusterCsr
-    # $csr | Out-File -FilePath ".\clusterCSR.csr" -Encoding utf8
-
-    # # Create private key
-    # openssl genrsa  -out customerCA.key 2048
-
-    # # Create self-signed certificate
-    # openssl req -new -x509 -days 3652 -key customerCA.key -out customerCA.crt -subj "/C=US/ST=State/L=City/O=Organization/OU=Organizational Unit/CN=Common Name"
-
-    # # Sign the cluster CSR
-    # openssl x509 -req -days 3652 -in clusterCSR.csr -CA customerCA.crt -CAkey customerCA.key  -CAcreateserial -out customerHsmCertificate.crt
+    # Sign the cluster CSR
+    openssl x509 -req -days 3652 -in clusterCSR.csr -CA customerCA.crt -CAkey customerCA.key  -CAcreateserial -out customerHsmCertificate.crt
 
     # Initialize cluster
-    # Initialize-HSM2Cluster -ClusterId "${cluster_id}" -SignedCert (Get-Content .\customerHsmCertificate.crt) -TrustAnchor (Get-Content .\customerCA.crt)
-# }
+    Initialize-HSM2Cluster -ClusterId "${cluster_id}" -SignedCert (Get-Content .\customerHsmCertificate.crt -Raw) -TrustAnchor (Get-Content .\customerCA.crt -Raw)
+}
+
+$desired_state = "INITIALIZED"
+$max_retries = 20
+$retry_interval_seconds = 30
+
+function Get-ClusterState {
+    $cluster = Get-HSM2Cluster -Filter @{clusterIds = "${cluster_id}"}
+    return $cluster.State
+}
+
+for ($retry_count = 1; $retry_count -le $max_retries; $retry_count++) {
+    $clusterState = Get-ClusterState
+
+    if ($clusterState -eq $desired_state) {
+        Write-Host "Cluster is in the desired state: $desired_state"
+        break
+    }
+
+    Write-Host "Cluster is in state: $clusterState. Retrying in $retry_interval_seconds seconds..."
+    Start-Sleep -Seconds $retry_interval_seconds
+}
+
+if ($retry_count -gt $max_retries) {
+    Write-Host "Timeout: Unable to reach the desired state within the specified retries."
+    throw
+}
+
+$cluster = Get-HSM2Cluster -Filter @{clusterIds = "${cluster_id}"}
+$eniIP = $cluster.Hsms.EniIp
+
+Copy-Item -Path .\customerCA.crt -Destination "C:\ProgramData\Amazon\CloudHSM\customerCA.crt"
+
+Set-Location -Path "C:\Program Files\Amazon\CloudHSM\bin"
+.\configure-cli.exe -a $eniIP
+
+# HERE
+.\cloudhsm-cli.exe cluster activate --password <PASSWORD>
+Set-Item -Path "env:CLOUDHSM_ROLE" -Value "admin"
+Set-Item -Path "env:CLOUDHSM_PIN" -Value "admin:<PASSWORD>"
+.\cloudhsm-cli.exe user create --username <USERNAME> --role crypto-user --password <OTHER_PASSWORD>
 

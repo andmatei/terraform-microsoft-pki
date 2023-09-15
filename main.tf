@@ -144,6 +144,24 @@ resource "aws_route" "private_nat_gateway" {
   nat_gateway_id         = aws_nat_gateway.nat_gateways[count.index].id
 }
 
+resource "aws_default_security_group" "security_group" {
+  vpc_id = aws_vpc.vpc.id
+
+  ingress {
+    protocol  = -1
+    self      = true
+    from_port = 0
+    to_port   = 0
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = -1
+    cidr_blocks = [local.internet]
+  }
+}
+
 ## CloudHSM
 
 resource "aws_cloudhsm_v2_cluster" "cluster" {
@@ -174,16 +192,11 @@ module "mad" {
 
 ## Root CA
 
-data "aws_security_group" "security_group" {
-  id = "sg-0054be4e3f3e7dc27"
-}
-
-
 module "ca" {
   source = "./modules/ca"
 
   key_name            = "Test"
-  security_group_ids  = [data.aws_security_group.security_group.id]
+  security_group_ids  = [aws_default_security_group.security_group.id]
   subnet_id           = aws_subnet.public_subnets[0].id
   ad_id               = module.mad.ds_managed_ad_id
   cloudhsm_cluster_id = aws_cloudhsm_v2_cluster.cluster.id
